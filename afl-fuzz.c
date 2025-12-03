@@ -143,6 +143,7 @@ EXP_ST u8  skip_deterministic,        /* Skip deterministic stages?       */
 static s32 out_fd,                    /* Persistent fd for out_file       */
            dev_urandom_fd = -1,       /* Persistent fd for /dev/urandom   */
            dev_null_fd = -1,          /* Persistent fd for /dev/null      */
+           stderr_log_fd = -1,        /* Persistent fd for stderr output  */
            fsrv_ctl_fd,               /* Fork server control pipe (write) */
            fsrv_st_fd;                /* Fork server status pipe (read)   */
 
@@ -2925,7 +2926,7 @@ EXP_ST void init_forkserver(char** argv) {
     setsid();
 
     dup2(dev_null_fd, 1);
-    dup2(dev_null_fd, 2);
+    dup2(stderr_log_fd >= 0 ? stderr_log_fd : dev_null_fd, 2);
 
     if (out_file) {
 
@@ -3143,6 +3144,19 @@ EXP_ST void init_forkserver(char** argv) {
 
 }
 
+/* Reset the temporary file used to capture stderr from the target. */
+static void reset_stderr_log(void) {
+
+  if (stderr_log_fd < 0) return;
+
+  if (lseek(stderr_log_fd, 0, SEEK_SET) == (off_t)-1)
+    PFATAL("lseek() failed on stderr log");
+
+  if (ftruncate(stderr_log_fd, 0))
+    PFATAL("ftruncate() failed on stderr log");
+
+}
+
 
 /* Execute target application, monitoring for timeouts. Return status
    information. The called program will update trace_bits[]. */
@@ -3157,6 +3171,7 @@ static u8 run_target(char** argv, u32 timeout) {
   u32 tb4;
 
   child_timed_out = 0;
+  reset_stderr_log();
 
   /* After this memset, trace_bits[] are effectively volatile, so we
      must prevent any earlier operations from venturing into that
@@ -3211,7 +3226,7 @@ static u8 run_target(char** argv, u32 timeout) {
       setsid();
 
       dup2(dev_null_fd, 1);
-      dup2(dev_null_fd, 2);
+      dup2(stderr_log_fd >= 0 ? stderr_log_fd : dev_null_fd, 2);
 
       if (out_file) {
 
@@ -3981,6 +3996,34 @@ static void write_crash_readme(void) {
 
 }
 
+/* Persist stderr produced by a crashing run so it can be replayed later. */
+static void save_crash_stderr(u64 crash_id) {
+
+  ssize_t rd;
+  u8 buf[4096];
+
+  if (stderr_log_fd < 0) return;
+
+  if (lseek(stderr_log_fd, 0, SEEK_SET) == (off_t)-1)
+    PFATAL("Unable to rewind stderr log");
+
+  u8* fn = alloc_printf("%s/replayable-crashes-stderr/id:%06llu,sig:%02u",
+                        out_dir, crash_id, kill_signal);
+
+  s32 fd = open(fn, O_WRONLY | O_CREAT | O_EXCL, 0600);
+  if (fd < 0) PFATAL("Unable to create '%s'", fn);
+
+  while ((rd = read(stderr_log_fd, buf, sizeof(buf))) > 0) {
+    ck_write(fd, buf, rd, fn);
+  }
+
+  if (rd < 0) PFATAL("Unable to read captured stderr");
+
+  close(fd);
+  ck_free(fn);
+
+}
+
 
 /* Check if the result of an execve() during routine fuzzing is interesting,
    save or queue the input test case for further analysis if so. Returns 1 if
@@ -3991,7 +4034,8 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
   u8  *fn = "";
   u8  hnb;
   //s32 fd;
-  u8  keeping = 0, res;
+  u8  keeping = 0, res, store_stderr = 0;
+  u64 stderr_id = 0;
 
   if (fault == crash_mode) {
 
@@ -4141,6 +4185,9 @@ keep_as_crash:
 
       if (!unique_crashes) write_crash_readme();
 
+      stderr_id = unique_crashes;
+      store_stderr = 1;
+
 #ifndef SIMPLE_FILES
 
       fn = alloc_printf("%s/replayable-crashes/id:%06llu,sig:%02u,%s", out_dir,
@@ -4170,6 +4217,8 @@ keep_as_crash:
      test case, too. */
 
   save_kl_messages_to_file(kl_messages, fn, 1, messages_sent);
+
+  if (store_stderr) save_crash_stderr(stderr_id);
 
   /*fd = open(fn, O_WRONLY | O_CREAT | O_EXCL, 0600);
   if (fd < 0) PFATAL("Unable to create '%s'", fn);
@@ -8215,6 +8264,12 @@ EXP_ST void setup_dirs_fds(void) {
   if (mkdir(tmp, 0700)) PFATAL("Unable to create '%s'", tmp);
   ck_free(tmp);
 
+  /* Stderr logs corresponding to recorded crashes. */
+
+  tmp = alloc_printf("%s/replayable-crashes-stderr", out_dir);
+  if (mkdir(tmp, 0700)) PFATAL("Unable to create '%s'", tmp);
+  ck_free(tmp);
+
   /* All recorded hangs. */
 
   tmp = alloc_printf("%s/replayable-hangs", out_dir);
@@ -8278,6 +8333,23 @@ EXP_ST void setup_stdio_file(void) {
   if (out_fd < 0) PFATAL("Unable to create '%s'", fn);
 
   ck_free(fn);
+
+}
+
+/* Setup a reusable file for capturing stderr output from the target. */
+static void setup_stderr_file(void) {
+
+  u8* fn = alloc_printf("%s/.stderr_log", out_dir);
+
+  unlink(fn); /* Ignore errors */
+
+  stderr_log_fd = open(fn, O_RDWR | O_CREAT | O_EXCL, 0600);
+
+  if (stderr_log_fd < 0) PFATAL("Unable to create '%s'", fn);
+
+  ck_free(fn);
+
+  reset_stderr_log();
 
 }
 
@@ -9230,6 +9302,7 @@ int main(int argc, char** argv) {
   detect_file_args(argv + optind + 1);
 
   if (!out_file) setup_stdio_file();
+  setup_stderr_file();
 
   check_binary(argv[optind]);
 
