@@ -351,6 +351,7 @@ char** use_argv;  /* argument to run the target program. In vanilla AFL, this is
 static u8 run_target(char** argv, u32 timeout);
 static inline u32 UR(u32 limit);
 static inline u8 has_new_bits(u8* virgin_map);
+static u8 maybe_save_assert_seed(u8 save_assert_seed);
 
 /* AFLNet-specific variables & functions */
 
@@ -3571,6 +3572,10 @@ static void perform_dry_run(char** argv) {
   u32 cal_failures = 0;
   u8* skip_crashes = getenv("AFL_SKIP_CRASHES");
 
+  if (!skip_crashes) skip_crashes = getenv("AFL_SKIP_CRASH");
+
+  u8 save_assert_seed = !!getenv("AFL_SAVE_ASSERT_SEED");
+
   while (q) {
 
     u8* use_mem;
@@ -3606,6 +3611,11 @@ static void perform_dry_run(char** argv) {
     u8 *fn_replay = alloc_printf("%s/replayable-queue/%s", out_dir, basename(q->fname));
     save_kl_messages_to_file(kl_messages, fn_replay, 1, messages_sent);
     ck_free(fn_replay);
+
+    u8 stored_assert_seed = 0;
+
+    if (res == FAULT_CRASH && skip_crashes && save_assert_seed)
+      stored_assert_seed = maybe_save_assert_seed(save_assert_seed);
 
     /* AFLNet delete the kl_messages */
     delete_kl_messages(kl_messages);
@@ -3670,6 +3680,8 @@ static void perform_dry_run(char** argv) {
         if (crash_mode) break;
 
         if (skip_crashes) {
+          if (stored_assert_seed)
+            ACTF("Stored assertion failure seed despite AFL_SKIP_CRASH.");
           WARNF("Test case results in a crash (skipping)");
           q->cal_failed = CAL_CHANCES;
           cal_failures++;
@@ -3996,8 +4008,43 @@ static void write_crash_readme(void) {
 
 }
 
+/* Check whether the captured stderr contains an assertion failure marker. */
+static u8 stderr_has_assert_fail(void) {
+
+  static const char needle[] = "ASSERTION FAILED";
+  const size_t needle_len = sizeof(needle) - 1;
+  ssize_t rd;
+  size_t carry = 0;
+  u8 buf[4096 + sizeof(needle)];
+
+  if (stderr_log_fd < 0) return 0;
+
+  if (lseek(stderr_log_fd, 0, SEEK_SET) == (off_t)-1)
+    PFATAL("Unable to rewind stderr log");
+
+  while ((rd = read(stderr_log_fd, buf + carry, sizeof(buf) - carry)) > 0) {
+
+    rd += (ssize_t)carry;
+
+    if (memmem(buf, rd, needle, needle_len)) return 1;
+
+    if ((size_t)rd >= needle_len - 1) {
+      carry = needle_len - 1;
+      memcpy(buf, buf + rd - carry, carry);
+    } else {
+      carry = rd;
+    }
+
+  }
+
+  if (rd < 0) PFATAL("Unable to read captured stderr");
+
+  return 0;
+
+}
+
 /* Persist stderr produced by a crashing run so it can be replayed later. */
-static void save_crash_stderr(u64 crash_id) {
+static void save_crash_stderr(u64 crash_id, const char* extra_tag) {
 
   ssize_t rd;
   u8 buf[4096];
@@ -4007,8 +4054,14 @@ static void save_crash_stderr(u64 crash_id) {
   if (lseek(stderr_log_fd, 0, SEEK_SET) == (off_t)-1)
     PFATAL("Unable to rewind stderr log");
 
-  u8* fn = alloc_printf("%s/replayable-crashes-stderr/id:%06llu,sig:%02u",
-                        out_dir, crash_id, kill_signal);
+  u8* fn;
+
+  if (extra_tag)
+    fn = alloc_printf("%s/replayable-crashes-stderr/id:%06llu,sig:%02u,%s",
+                      out_dir, crash_id, kill_signal, extra_tag);
+  else
+    fn = alloc_printf("%s/replayable-crashes-stderr/id:%06llu,sig:%02u",
+                      out_dir, crash_id, kill_signal);
 
   s32 fd = open(fn, O_WRONLY | O_CREAT | O_EXCL, 0600);
   if (fd < 0) PFATAL("Unable to create '%s'", fn);
@@ -4021,6 +4074,47 @@ static void save_crash_stderr(u64 crash_id) {
 
   close(fd);
   ck_free(fn);
+
+}
+
+/* Store assertion-failure crashes even when we are skipping initial crashes. */
+static u8 maybe_save_assert_seed(u8 save_assert_seed) {
+
+  if (!save_assert_seed) return 0;
+  if (kill_signal != SIGABRT) return 0;
+  if (!stderr_has_assert_fail()) return 0;
+
+  total_crashes++;
+
+  if (unique_crashes >= KEEP_UNIQUE_CRASH) return 0;
+
+  if (!unique_crashes) write_crash_readme();
+
+  u64 crash_id = unique_crashes;
+
+#ifndef SIMPLE_FILES
+
+  u8* fn = alloc_printf("%s/replayable-crashes/id:%06llu,sig:%02u,assert",
+                        out_dir, crash_id, kill_signal);
+
+#else
+
+  u8* fn = alloc_printf("%s/replayable-crashes/id_%06llu_%02u_assert",
+                        out_dir, crash_id, kill_signal);
+
+#endif /* ^!SIMPLE_FILES */
+
+  save_kl_messages_to_file(kl_messages, fn, 1, messages_sent);
+  ck_free(fn);
+
+  save_crash_stderr(crash_id, "assert");
+
+  unique_crashes++;
+
+  last_crash_time = get_cur_time();
+  last_crash_execs = total_execs;
+
+  return 1;
 
 }
 
@@ -4218,7 +4312,7 @@ keep_as_crash:
 
   save_kl_messages_to_file(kl_messages, fn, 1, messages_sent);
 
-  if (store_stderr) save_crash_stderr(stderr_id);
+  if (store_stderr) save_crash_stderr(stderr_id, NULL);
 
   /*fd = open(fn, O_WRONLY | O_CREAT | O_EXCL, 0600);
   if (fd < 0) PFATAL("Unable to create '%s'", fn);

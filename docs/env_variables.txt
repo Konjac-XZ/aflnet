@@ -111,10 +111,14 @@ checks or alter some of the more exotic semantics of the tool:
     on Linux systems. This slows things down, but lets you run more instances
     of afl-fuzz than would be prudent (if you really want to).
 
-  - AFL_SKIP_CRASHES causes AFL to tolerate crashing files in the input
-    queue. This can help with rare situations where a program crashes only
-    intermittently, but it's not really recommended under normal operating
-    conditions.
+  - AFL_SKIP_CRASHES (or AFL_SKIP_CRASH) causes AFL to tolerate crashing files
+    in the input queue. This can help with rare situations where a program
+    crashes only intermittently, but it's not really recommended under normal
+    operating conditions.
+
+  - AFL_SAVE_ASSERT_SEED preserves SIGABRT test cases that print
+    "ASSERTION FAILED" to stderr in replayable-crashes even when crash skipping
+    is enabled.
 
   - Setting AFL_HANG_TMOUT allows you to specify a different timeout for
     deciding if a particular test case is a "hang". The default is 1 second
