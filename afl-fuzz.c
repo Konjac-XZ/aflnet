@@ -4473,6 +4473,32 @@ static u8 delete_files(u8* path, u8* prefix) {
 }
 
 
+/* Remove all non-dot entries from a directory, ignoring errors. */
+
+static void clear_directory(u8* path) {
+
+  DIR* d = opendir(path);
+  struct dirent* d_ent;
+
+  if (!d) return;
+
+  while ((d_ent = readdir(d))) {
+
+    if (d_ent->d_name[0] != '.') {
+
+      u8* fname = alloc_printf("%s/%s", path, d_ent->d_name);
+      unlink(fname);
+      ck_free(fname);
+
+    }
+
+  }
+
+  closedir(d);
+
+}
+
+
 /* Get the number of runnable processes, with some simple smoothing. */
 
 static double get_runnable_processes(void) {
@@ -4767,6 +4793,10 @@ static void maybe_delete_out_dir(void) {
   }
 
   if (delete_files(fn, CASE_PREFIX)) goto dir_cleanup_failed;
+  ck_free(fn);
+
+  fn = alloc_printf("%s/replayable-crashes-stderr", out_dir);
+  if (delete_files(fn, "")) goto dir_cleanup_failed;
   ck_free(fn);
 
   /* Delete regions. */
@@ -8261,37 +8291,133 @@ EXP_ST void setup_dirs_fds(void) {
   /* All recorded crashes. */
 
   tmp = alloc_printf("%s/replayable-crashes", out_dir);
-  if (mkdir(tmp, 0700)) PFATAL("Unable to create '%s'", tmp);
+  if (mkdir(tmp, 0700)) {
+    if (errno == EEXIST && in_place_resume) {
+      /* Directory exists, clear its contents */
+      DIR* d = opendir(tmp);
+      if (d) {
+        struct dirent* d_ent;
+        while ((d_ent = readdir(d))) {
+          if (d_ent->d_name[0] != '.') {
+            u8* fname = alloc_printf("%s/%s", tmp, d_ent->d_name);
+            unlink(fname); /* Ignore errors */
+            ck_free(fname);
+          }
+        }
+        closedir(d);
+      }
+    } else {
+      PFATAL("Unable to create '%s'", tmp);
+    }
+  }
   ck_free(tmp);
 
   /* Stderr logs corresponding to recorded crashes. */
 
   tmp = alloc_printf("%s/replayable-crashes-stderr", out_dir);
-  if (mkdir(tmp, 0700)) PFATAL("Unable to create '%s'", tmp);
+  if (mkdir(tmp, 0700)) {
+    if (errno == EEXIST) {
+      clear_directory(tmp);
+    } else {
+      PFATAL("Unable to create '%s'", tmp);
+    }
+  }
   ck_free(tmp);
 
   /* All recorded hangs. */
 
   tmp = alloc_printf("%s/replayable-hangs", out_dir);
-  if (mkdir(tmp, 0700)) PFATAL("Unable to create '%s'", tmp);
+  if (mkdir(tmp, 0700)) {
+    if (errno == EEXIST && in_place_resume) {
+      /* Directory exists, clear its contents */
+      DIR* d = opendir(tmp);
+      if (d) {
+        struct dirent* d_ent;
+        while ((d_ent = readdir(d))) {
+          if (d_ent->d_name[0] != '.') {
+            u8* fname = alloc_printf("%s/%s", tmp, d_ent->d_name);
+            unlink(fname); /* Ignore errors */
+            ck_free(fname);
+          }
+        }
+        closedir(d);
+      }
+    } else {
+      PFATAL("Unable to create '%s'", tmp);
+    }
+  }
   ck_free(tmp);
 
   /* All files keeping extracted regions -- for debugging purpose. */
 
   tmp = alloc_printf("%s/regions", out_dir);
-  if (mkdir(tmp, 0700)) PFATAL("Unable to create '%s'", tmp);
+  if (mkdir(tmp, 0700)) {
+    if (errno == EEXIST && in_place_resume) {
+      /* Directory exists, clear its contents */
+      DIR* d = opendir(tmp);
+      if (d) {
+        struct dirent* d_ent;
+        while ((d_ent = readdir(d))) {
+          if (d_ent->d_name[0] != '.') {
+            u8* fname = alloc_printf("%s/%s", tmp, d_ent->d_name);
+            unlink(fname); /* Ignore errors */
+            ck_free(fname);
+          }
+        }
+        closedir(d);
+      }
+    } else {
+      PFATAL("Unable to create '%s'", tmp);
+    }
+  }
   ck_free(tmp);
 
   /* All recorded new paths exercising the implemented state machine. */
 
   tmp = alloc_printf("%s/replayable-new-ipsm-paths", out_dir);
-  if (mkdir(tmp, 0700)) PFATAL("Unable to create '%s'", tmp);
+  if (mkdir(tmp, 0700)) {
+    if (errno == EEXIST && in_place_resume) {
+      /* Directory exists, clear its contents */
+      DIR* d = opendir(tmp);
+      if (d) {
+        struct dirent* d_ent;
+        while ((d_ent = readdir(d))) {
+          if (d_ent->d_name[0] != '.') {
+            u8* fname = alloc_printf("%s/%s", tmp, d_ent->d_name);
+            unlink(fname); /* Ignore errors */
+            ck_free(fname);
+          }
+        }
+        closedir(d);
+      }
+    } else {
+      PFATAL("Unable to create '%s'", tmp);
+    }
+  }
   ck_free(tmp);
 
   /* All recorded paths in structure files. */
 
   tmp = alloc_printf("%s/replayable-queue", out_dir);
-  if (mkdir(tmp, 0700)) PFATAL("Unable to create '%s'", tmp);
+  if (mkdir(tmp, 0700)) {
+    if (errno == EEXIST && in_place_resume) {
+      /* Directory exists, clear its contents */
+      DIR* d = opendir(tmp);
+      if (d) {
+        struct dirent* d_ent;
+        while ((d_ent = readdir(d))) {
+          if (d_ent->d_name[0] != '.') {
+            u8* fname = alloc_printf("%s/%s", tmp, d_ent->d_name);
+            unlink(fname); /* Ignore errors */
+            ck_free(fname);
+          }
+        }
+        closedir(d);
+      }
+    } else {
+      PFATAL("Unable to create '%s'", tmp);
+    }
+  }
   ck_free(tmp);
 
   /* Generally useful file descriptors. */
