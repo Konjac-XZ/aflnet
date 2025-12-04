@@ -1,0 +1,346 @@
+#!/usr/bin/env python3
+"""
+afl-convert: Convert AFL seeds to aflnet-replay format
+
+Converts raw binary seeds (as used by afl-fuzz) into the packet-prefixed format
+expected by aflnet-replay. Each packet is prefixed with a 4-byte little-endian
+size field.
+
+Usage:
+    afl-convert <input_file> <output_file> <protocol> [options]
+
+Supported protocols:
+    RTSP    - Real Time Streaming Protocol (delimiter: double CRLF)
+    FTP     - File Transfer Protocol (delimiter: CRLF)
+    MQTT    - Message Queuing Telemetry Transport (variable length encoding)
+    TFTP    - Trivial File Transfer Protocol (delimiter: null byte)
+    DHCP    - Dynamic Host Configuration Protocol (delimiter: double 0xFF)
+    SNTP    - Simple Network Time Protocol (delimiter: null byte)
+    DNS     - Domain Name System (fixed 2-byte header)
+    raw     - Raw format (no parsing, treat entire file as single packet)
+
+Examples:
+    afl-convert seed.bin seed.replay RTSP
+    afl-convert ftp_seed.bin ftp.replay FTP
+    afl-convert mqtt_seed.bin mqtt.replay MQTT
+"""
+
+import struct
+import sys
+import os
+from pathlib import Path
+
+
+class ProtocolParser:
+    """Base class for protocol-specific message extraction."""
+
+    @staticmethod
+    def extract_messages(data):
+        """Extract messages from raw data. Returns list of byte strings."""
+        raise NotImplementedError
+
+
+class RTSPParser(ProtocolParser):
+    """RTSP: Messages delimited by double CRLF (\\r\\n\\r\\n)"""
+
+    @staticmethod
+    def extract_messages(data):
+        delimiter = b'\r\n\r\n'
+        messages = []
+        offset = 0
+
+        while offset < len(data):
+            # Find next delimiter
+            idx = data.find(delimiter, offset)
+            if idx == -1:
+                # No more delimiters, take rest of data
+                if offset < len(data):
+                    messages.append(data[offset:])
+                break
+
+            # Include delimiter in message
+            msg_end = idx + len(delimiter)
+            messages.append(data[offset:msg_end])
+            offset = msg_end
+
+        return [m for m in messages if m]  # Filter empty messages
+
+
+class FTPParser(ProtocolParser):
+    """FTP: Messages delimited by CRLF (\\r\\n)"""
+
+    @staticmethod
+    def extract_messages(data):
+        delimiter = b'\r\n'
+        messages = []
+        offset = 0
+
+        while offset < len(data):
+            idx = data.find(delimiter, offset)
+            if idx == -1:
+                if offset < len(data):
+                    messages.append(data[offset:])
+                break
+
+            msg_end = idx + len(delimiter)
+            messages.append(data[offset:msg_end])
+            offset = msg_end
+
+        return [m for m in messages if m]
+
+
+class MQTTParser(ProtocolParser):
+    """MQTT: Variable length encoding in 2-byte header"""
+
+    @staticmethod
+    def extract_messages(data):
+        messages = []
+        offset = 0
+
+        while offset < len(data):
+            if offset + 2 > len(data):
+                # Not enough data for header
+                if offset < len(data):
+                    messages.append(data[offset:])
+                break
+
+            # MQTT uses variable length encoding
+            # First byte is control byte, remaining bits indicate length
+            control_byte = data[offset]
+
+            # For simplicity, assume 2-byte header format
+            # Real MQTT is more complex, but this handles basic cases
+            if offset + 2 <= len(data):
+                length_bytes = data[offset + 1]
+                msg_len = 2 + length_bytes
+
+                if offset + msg_len <= len(data):
+                    messages.append(data[offset:offset + msg_len])
+                    offset += msg_len
+                else:
+                    # Incomplete message, take rest
+                    messages.append(data[offset:])
+                    break
+            else:
+                messages.append(data[offset:])
+                break
+
+        return [m for m in messages if m]
+
+
+class TFTPParser(ProtocolParser):
+    """TFTP: Messages delimited by null byte (\\x00)"""
+
+    @staticmethod
+    def extract_messages(data):
+        delimiter = b'\x00'
+        messages = []
+        offset = 0
+
+        while offset < len(data):
+            idx = data.find(delimiter, offset)
+            if idx == -1:
+                if offset < len(data):
+                    messages.append(data[offset:])
+                break
+
+            msg_end = idx + len(delimiter)
+            messages.append(data[offset:msg_end])
+            offset = msg_end
+
+        return [m for m in messages if m]
+
+
+class DHCPParser(ProtocolParser):
+    """DHCP: Messages delimited by double 0xFF (\\xff\\xff)"""
+
+    @staticmethod
+    def extract_messages(data):
+        delimiter = b'\xff\xff'
+        messages = []
+        offset = 0
+
+        while offset < len(data):
+            idx = data.find(delimiter, offset)
+            if idx == -1:
+                if offset < len(data):
+                    messages.append(data[offset:])
+                break
+
+            msg_end = idx + len(delimiter)
+            messages.append(data[offset:msg_end])
+            offset = msg_end
+
+        return [m for m in messages if m]
+
+
+class SNTPParser(ProtocolParser):
+    """SNTP: Messages delimited by null byte (\\x00)"""
+
+    @staticmethod
+    def extract_messages(data):
+        # SNTP uses null byte delimiter similar to TFTP
+        delimiter = b'\x00'
+        messages = []
+        offset = 0
+
+        while offset < len(data):
+            idx = data.find(delimiter, offset)
+            if idx == -1:
+                if offset < len(data):
+                    messages.append(data[offset:])
+                break
+
+            msg_end = idx + len(delimiter)
+            messages.append(data[offset:msg_end])
+            offset = msg_end
+
+        return [m for m in messages if m]
+
+
+class DNSParser(ProtocolParser):
+    """DNS: Fixed 2-byte header with length field"""
+
+    @staticmethod
+    def extract_messages(data):
+        messages = []
+        offset = 0
+
+        while offset < len(data):
+            if offset + 2 > len(data):
+                if offset < len(data):
+                    messages.append(data[offset:])
+                break
+
+            # DNS has 2-byte length field (big-endian)
+            msg_len = struct.unpack('>H', data[offset:offset + 2])[0]
+            total_len = 2 + msg_len
+
+            if offset + total_len <= len(data):
+                messages.append(data[offset:offset + total_len])
+                offset += total_len
+            else:
+                # Incomplete message
+                messages.append(data[offset:])
+                break
+
+        return [m for m in messages if m]
+
+
+class RawParser(ProtocolParser):
+    """Raw: No parsing, treat entire file as single packet"""
+
+    @staticmethod
+    def extract_messages(data):
+        return [data] if data else []
+
+
+# Protocol registry
+PARSERS = {
+    'RTSP': RTSPParser,
+    'FTP': FTPParser,
+    'MQTT': MQTTParser,
+    'TFTP': TFTPParser,
+    'DHCP': DHCPParser,
+    'SNTP': SNTPParser,
+    'DNS': DNSParser,
+    'RAW': RawParser,
+}
+
+
+def validate_packet_size(size):
+    """Validate packet size (1 byte to 10MB)"""
+    MAX_PACKET_SIZE = 10 * 1024 * 1024  # 10MB
+    if size < 1 or size > MAX_PACKET_SIZE:
+        raise ValueError(f"Invalid packet size: {size} (must be 1-{MAX_PACKET_SIZE})")
+
+
+def convert_seed(input_file, output_file, protocol):
+    """
+    Convert AFL seed to aflnet-replay format.
+
+    Args:
+        input_file: Path to input seed file
+        output_file: Path to output replay file
+        protocol: Protocol name (RTSP, FTP, MQTT, etc.)
+
+    Returns:
+        Tuple of (num_packets, total_bytes)
+    """
+
+    # Validate protocol
+    protocol_upper = protocol.upper()
+    if protocol_upper not in PARSERS:
+        raise ValueError(f"Unknown protocol: {protocol}. Supported: {', '.join(PARSERS.keys())}")
+
+    # Read input file
+    try:
+        with open(input_file, 'rb') as f:
+            data = f.read()
+    except IOError as e:
+        raise IOError(f"Failed to read input file: {e}")
+
+    if not data:
+        raise ValueError("Input file is empty")
+
+    # Extract messages using protocol parser
+    parser = PARSERS[protocol_upper]
+    messages = parser.extract_messages(data)
+
+    if not messages:
+        raise ValueError("No messages extracted from input file")
+
+    # Write replay format
+    try:
+        with open(output_file, 'wb') as f:
+            total_bytes = 0
+            for msg in messages:
+                msg_size = len(msg)
+
+                # Validate packet size
+                try:
+                    validate_packet_size(msg_size)
+                except ValueError as e:
+                    raise ValueError(f"Packet validation failed: {e}")
+
+                # Write 4-byte little-endian size
+                f.write(struct.pack('<I', msg_size))
+                # Write packet data
+                f.write(msg)
+                total_bytes += msg_size
+    except IOError as e:
+        raise IOError(f"Failed to write output file: {e}")
+
+    return len(messages), total_bytes
+
+
+def main():
+    if len(sys.argv) < 4:
+        print(__doc__)
+        sys.exit(1)
+
+    input_file = sys.argv[1]
+    output_file = sys.argv[2]
+    protocol = sys.argv[3]
+
+    # Validate input file exists
+    if not os.path.isfile(input_file):
+        print(f"Error: Input file not found: {input_file}", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        num_packets, total_bytes = convert_seed(input_file, output_file, protocol)
+        print(f"✓ Converted {input_file} → {output_file}")
+        print(f"  Protocol: {protocol.upper()}")
+        print(f"  Packets: {num_packets}")
+        print(f"  Total size: {total_bytes} bytes")
+    except (ValueError, IOError) as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(f"Unexpected error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == '__main__':
+    main()
