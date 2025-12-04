@@ -124,6 +124,15 @@ else {fprintf(stderr, "[AFLNet-replay] Protocol %s has not been supported yet!\n
       packet_count++;
     	fprintf(stderr,"\nSize of the current packet %d is  %d\n", packet_count, size);
 
+      // Validate packet size to prevent excessive memory allocation
+      // Maximum reasonable packet size: 10MB
+      if (size == 0 || size > 10485760) {
+        fprintf(stderr, "[AFLNet-replay] Error: Invalid packet size %u (must be between 1 and 10485760 bytes)\n", size);
+        fprintf(stderr, "[AFLNet-replay] This may indicate a corrupted or improperly formatted input file.\n");
+        fprintf(stderr, "[AFLNet-replay] Expected format: [4-byte size][packet data][4-byte size][packet data]...\n");
+        break;
+      }
+
       buf = (char *)ck_alloc(size);
       fread(buf, size, 1, fp);
 
